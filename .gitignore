@@ -1,0 +1,13 @@
+build
+.cache
+.vscode
+
+# model
+*.onnx
+*.engine
+*.pt
+
+#nsys
+*.qdrep
+*.sqlite
+*.nsys-rep
