@@ -6,6 +6,7 @@ build
 *.onnx
 *.engine
 *.pt
+*.wts
 
 #nsys
 *.qdrep

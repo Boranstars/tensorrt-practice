@@ -3,6 +3,7 @@
 #include <iostream>
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <fmt/core.h>
@@ -16,9 +17,21 @@ static Logger glogger(Severity::kINFO);
 
 constexpr int INPUT_SIZE = 1;
 constexpr int OUTPUT_SIZE = 1;
-auto creatEngine(std::unique_ptr<nvinfer1::IBuilder> builder, std::unique_ptr<nvinfer1::INetworkDefinition> network) {
+std::unique_ptr<nvinfer1::ICudaEngine> createEngine(std::unique_ptr<nvinfer1::IBuilder> builder, std::unique_ptr<nvinfer1::INetworkDefinition> network, bool useDLA = true) {
     // 创建 BuilderConfig
     auto config = std::unique_ptr<nvinfer1::IBuilderConfig>{builder->createBuilderConfig()};
+
+    // 设置设备
+    if (useDLA) {
+        glogger.log(Severity::kINFO, "Using DLA for inference.");
+        config->setFlag(BuilderFlag::kGPU_FALLBACK);
+        config->setFlag(BuilderFlag::kFP16);
+        config->setDefaultDeviceType(DeviceType::kDLA);
+        config->setDLACore(0);
+    } else {
+        glogger.log(Severity::kINFO, "Using GPU for inference.");
+    }
+    
     // 此处设置工作空间大小为当前GPU剩余内存大小
     size_t free, total;
     cudaMemGetInfo(&free, &total);
@@ -26,7 +39,7 @@ auto creatEngine(std::unique_ptr<nvinfer1::IBuilder> builder, std::unique_ptr<nv
     glogger.log(Severity::kINFO, fmt::format("GPU memory - free: {} MB, total: {} MB", free / (1024 * 1024), total / (1024 * 1024)).c_str());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, free);
     // 构建引擎
-    auto engine = builder->buildEngineWithConfig(*network, *config);
+    auto engine = std::unique_ptr<nvinfer1::ICudaEngine>{builder->buildEngineWithConfig(*network, *config)};
 
     assert(engine != nullptr);
     // 在构建完engine之后,builder和network就不再需要了,可以释放掉(通过智能指针自动释放，这里获取了所有权)
@@ -189,6 +202,9 @@ int main() {
     // 整体流程：
     // 创建 Builder
     std::unique_ptr<nvinfer1::IBuilder> builder{nvinfer1::createInferBuilder(glogger)};
+
+
+    
     // 创建 Network（显式 batch）
 
     const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
@@ -217,7 +233,7 @@ int main() {
     
     glogger.log(Severity::kINFO, "------------------- Engine Build ------------------");
 
-    auto engine = std::unique_ptr<nvinfer1::ICudaEngine> {creatEngine(std::move(builder), std::move(network))};
+    auto engine = createEngine(std::move(builder), std::move(network));
     checkEngine(engine.get());
     serializeEngine(std::move(engine));
 
