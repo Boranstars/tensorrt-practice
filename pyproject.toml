@@ -1,0 +1,39 @@
+[project]
+name = "tensorrt-practice"
+version = "0.1.0"
+description = "TensorRT learning workspace with CMake modules and model export helpers."
+readme = "models/README.md"
+requires-python = ">=3.10"
+dependencies = [
+	"numpy>=1.24,<2",
+	"onnx>=1.14,<2",
+	"protobuf>=4.25,<6",
+]
+
+[project.optional-dependencies]
+# Shared Python utilities for model export scripts.
+export = [
+	"pillow>=10,<12",
+]
+
+# Non-Jetson convenience group. On x86_64/dev machines this can be installed directly.
+cpu-dev = [
+	"torch>=2.2,<2.6; platform_machine != 'aarch64'",
+	"torchvision>=0.17,<0.21; platform_machine != 'aarch64'",
+]
+
+# Jetson note:
+# Do NOT install torch/torchvision from PyPI on aarch64 blindly.
+# Install JetPack-matched NVIDIA wheels first, then install this project extras.
+jetson = [
+	"jetson-stats>=4.2; platform_machine == 'aarch64' and sys_platform == 'linux'",
+]
+
+[tool.tensorrt_practice]
+jetson_torch_install = "Install JetPack-matched NVIDIA torch/torchvision wheels first, then install this project with: pip install -e .[export,jetson]"
+jetson_torch_install_uv = "Install JetPack-matched NVIDIA torch/torchvision wheels first, then run: uv sync --extra export --extra jetson"
+
+[tool.uv]
+# This repository uses uv for environment/dependency management only.
+# Do not build/install this repository itself as a package.
+package = false
