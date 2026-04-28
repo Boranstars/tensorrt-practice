@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     }
 
     TRTParams params{
-        .useDLA = true,
+        .useDLA = false,
         .useFP16 = true,
         .batchSize = 1,
         .channels = 3,

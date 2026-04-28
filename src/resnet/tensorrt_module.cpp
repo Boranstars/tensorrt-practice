@@ -65,6 +65,11 @@ auto TensorRTModule::createEngine(std::unique_ptr<nvinfer1::IBuilder> builder,
         }
     }
 
+    if(m_params.useFP16) {
+        config->setFlag(BuilderFlag::kFP16);
+        m_logger->log(Severity::kINFO, "Using FP16 precision for inference.");
+    }
+
     size_t free{0}, total{0};
     CHECK(cudaMemGetInfo(&free, &total));
     m_logger->log(Severity::kINFO,
