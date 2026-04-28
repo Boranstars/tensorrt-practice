@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <fmt/core.h>
 #include <fstream>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <stdexcept>
 #include <vector>
 
 #define CHECK(status)                                                          \
@@ -22,6 +25,44 @@
 namespace fs = std::filesystem;
 using namespace nvinfer1;
 
+static void loadImageToPinnedMemory(const std::string &imagePath,
+                                    float *targetBuffer,
+                                    int width,
+                                    int height) {
+    if (targetBuffer == nullptr) {
+        throw std::runtime_error("targetBuffer is null");
+    }
+
+    cv::Mat bgr = cv::imread(imagePath, cv::IMREAD_COLOR);
+    if (bgr.empty()) {
+        throw std::runtime_error("failed to read image: " + imagePath);
+    }
+
+    cv::Mat resized;
+    cv::resize(bgr, resized, cv::Size(width, height));
+
+    cv::Mat rgb;
+    cv::cvtColor(resized, rgb, cv::COLOR_BGR2RGB);
+
+    cv::Mat f32;
+    rgb.convertTo(f32, CV_32FC3, 1.0 / 255.0);
+
+    const float mean[3] = {0.485f, 0.456f, 0.406f};
+    const float std_val[3] = {0.229f, 0.224f, 0.225f};
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const cv::Vec3f &pixel = f32.at<cv::Vec3f>(y, x);
+            targetBuffer[0 * width * height + y * width + x] =
+                (pixel[0] - mean[0]) / std_val[0];
+            targetBuffer[1 * width * height + y * width + x] =
+                (pixel[1] - mean[1]) / std_val[1];
+            targetBuffer[2 * width * height + y * width + x] =
+                (pixel[2] - mean[2]) / std_val[2];
+        }
+    }
+}
+
 TensorRTModule::TensorRTModule(std::unique_ptr<nvinfer1::ILogger> logger,
                                const TRTParams &config)
     : m_logger(std::move(logger)), m_params(config) {}
@@ -31,6 +72,10 @@ TensorRTModule::~TensorRTModule() {
         cudaFree(deviceInput);
     if (deviceOutput)
         cudaFree(deviceOutput);
+    if (m_pinnedInput)
+        cudaFreeHost(m_pinnedInput);
+    if (m_pinnedOutput)
+        cudaFreeHost(m_pinnedOutput);
     if (m_stream)
         cudaStreamDestroy(m_stream);
 }
@@ -63,6 +108,11 @@ auto TensorRTModule::createEngine(std::unique_ptr<nvinfer1::IBuilder> builder,
             m_logger->log(Severity::kWARNING,
                           "DLA not available. Fallingback to GPU.");
         }
+    }
+
+    if(m_params.useFP16) {
+        config->setFlag(BuilderFlag::kFP16);
+        m_logger->log(Severity::kINFO, "Using FP16 precision for inference.");
     }
 
     size_t free{0}, total{0};
@@ -119,15 +169,12 @@ void TensorRTModule::serializeEngine(std::unique_ptr<nvinfer1::ICudaEngine> &eng
         fmt::format("Engine serialized to {}", engineFilePath).c_str());
 }
 
-void TensorRTModule::doInference(float *input, float *output) {
-    CHECK(cudaMemcpyAsync(deviceInput, input,
-                          m_params.batchSize * m_params.channels * m_params.input_h *
-                              m_params.input_w * sizeof(float),
+void TensorRTModule::doInference() {
+    CHECK(cudaMemcpyAsync(deviceInput, m_pinnedInput, m_inputSize,
                           cudaMemcpyHostToDevice, m_stream));
     if (!m_context->enqueueV3(m_stream))
         m_logger->log(Severity::kERROR, "Failed to execute inference.");
-    CHECK(cudaMemcpyAsync(output, deviceOutput,
-                          m_params.batchSize * m_params.output_size * sizeof(float),
+    CHECK(cudaMemcpyAsync(m_pinnedOutput, deviceOutput, m_outputSize,
                           cudaMemcpyDeviceToHost, m_stream));
     CHECK(cudaStreamSynchronize(m_stream));
 }
@@ -176,11 +223,19 @@ void TensorRTModule::initialize(const TRTParams &buildConfig) {
     inputTensorName = m_engine->getIOTensorName(0);
     outputTensorName = m_engine->getIOTensorName(1);
 
+        m_inputSize = static_cast<size_t>(m_params.batchSize) * m_params.channels *
+                                    m_params.input_h * m_params.input_w * sizeof(float);
+        m_outputSize = static_cast<size_t>(m_params.batchSize) * m_params.output_size *
+                                     sizeof(float);
+
     CHECK(cudaMalloc(&deviceInput,
-                     m_params.batchSize * m_params.channels * m_params.input_h *
-                         m_params.input_w * sizeof(float)));
+                                         m_inputSize));
     CHECK(cudaMalloc(&deviceOutput,
-                     m_params.batchSize * m_params.output_size * sizeof(float)));
+                                         m_outputSize));
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&m_pinnedInput), m_inputSize,
+                                                cudaHostAllocDefault));
+        CHECK(cudaHostAlloc(reinterpret_cast<void **>(&m_pinnedOutput), m_outputSize,
+                                                cudaHostAllocDefault));
     CHECK(cudaStreamCreate(&m_stream));
 
     m_context->setTensorAddress(inputTensorName.c_str(), deviceInput);
@@ -190,55 +245,49 @@ void TensorRTModule::initialize(const TRTParams &buildConfig) {
                   "TensorRTModule initialized. Resources allocated.");
 }
 
-void TensorRTModule::infer(const float* inputData) {
-    if (inputData == nullptr) {
-        m_logger->log(Severity::kERROR, "inputData is null.");
+void TensorRTModule::infer(const std::string &imagePath) {
+    try {
+        loadImageToPinnedMemory(imagePath, m_pinnedInput, m_params.input_w,
+                                m_params.input_h);
+    } catch (const std::exception &e) {
+        m_logger->log(Severity::kERROR, e.what());
         return;
     }
 
-    std::vector<float> input(m_params.batchSize * m_params.channels * m_params.input_h *
-                                 m_params.input_w);
-    std::copy(inputData, inputData + input.size(), input.begin());
-    std::vector<float> output(m_params.batchSize * m_params.output_size, 0.0f);
-
     auto start = std::chrono::high_resolution_clock::now();
-    doInference(input.data(), output.data());
+    doInference();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::high_resolution_clock::now() - start);
 
-    for (const auto &prob : output)
-        fmt::print("{:.6f} ", prob);
+    for (int i = 0; i < m_params.batchSize * m_params.output_size; ++i)
+        fmt::print("{:.6f} ", m_pinnedOutput[i]);
     fmt::print("\n");
 
     int maxClass = 0;
-    float maxProb = output[0];
+    float maxProb = m_pinnedOutput[0];
     for (int i = 1; i < m_params.output_size; ++i)
-        if (output[i] > maxProb) {
-            maxProb = output[i];
+        if (m_pinnedOutput[i] > maxProb) {
+            maxProb = m_pinnedOutput[i];
             maxClass = i;
         }
     fmt::print("Predicted class: {}, probability: {:.6f}\n", maxClass, maxProb);
     fmt::print("Inference latency: {} us\n", duration.count());
 }
 
-double TensorRTModule::benchmark(int iterations, const float* inputData) {
-    if (inputData == nullptr) {
-        m_logger->log(Severity::kERROR, "inputData is null.");
+double TensorRTModule::benchmark(int iterations) {
+    if (m_pinnedInput == nullptr) {
+        m_logger->log(Severity::kERROR,
+                      "m_pinnedInput is null. Call infer() first or preload input.");
         return 0.0;
     }
 
-    std::vector<float> input(m_params.batchSize * m_params.channels * m_params.input_h *
-                                 m_params.input_w);
-    std::copy(inputData, inputData + input.size(), input.begin());
-    std::vector<float> output(m_params.batchSize * m_params.output_size, 0.0f);
-
     // warm-up
     for (int i = 0; i < 10; ++i)
-        doInference(input.data(), output.data());
+        doInference();
 
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < iterations; ++i)
-        doInference(input.data(), output.data());
+        doInference();
     auto end = std::chrono::high_resolution_clock::now();
 
     double totalMs = std::chrono::duration<double, std::milli>(end - start).count();

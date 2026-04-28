@@ -3,6 +3,7 @@
 #include "logging.h"
 #include <NvInfer.h>
 #include <NvInferRuntime.h>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,8 +26,8 @@ class TensorRTModule {
     ~TensorRTModule();
 
     void initialize(const TRTParams &buildConfig = TRTParams());
-    void infer(const float* inputData);
-    double benchmark(int iterations, const float* inputData);
+    void infer(const std::string &imagePath);
+    double benchmark(int iterations);
 
   private:
     void parserModel(const std::string &onnxFilePath,
@@ -36,7 +37,7 @@ class TensorRTModule {
         -> std::unique_ptr<nvinfer1::ICudaEngine>;
     void serializeEngine(std::unique_ptr<nvinfer1::ICudaEngine> &engine,
                          std::string_view engineFilePath);
-    void doInference(float *input, float *output);
+    void doInference();
 
   private:
     std::unique_ptr<nvinfer1::ILogger> m_logger;
@@ -47,6 +48,10 @@ class TensorRTModule {
     std::unique_ptr<nvinfer1::IExecutionContext> m_context;
     void *deviceInput{nullptr};
     void *deviceOutput{nullptr};
+    float *m_pinnedInput{nullptr};
+    float *m_pinnedOutput{nullptr};
+    size_t m_inputSize{0};
+    size_t m_outputSize{0};
     cudaStream_t m_stream{nullptr};
 
     std::string inputTensorName;
