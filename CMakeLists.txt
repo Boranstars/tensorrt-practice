@@ -3,7 +3,7 @@ project(trt_practice LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+
 
 # Shared, configurable dependency paths. Override via -D... when needed.
 set(TRT_INCLUDE_DIR "/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}" CACHE PATH "TensorRT include directory")

@@ -1,5 +1,6 @@
 add_executable(googlenet_demo
     main.cpp
+    tensorrt_module.cpp
 )
 
 target_link_libraries(googlenet_demo PRIVATE
@@ -9,3 +10,4 @@ target_link_libraries(googlenet_demo PRIVATE
     cudart
     fmt::fmt
 )
+
