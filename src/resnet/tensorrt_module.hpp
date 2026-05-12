@@ -18,6 +18,8 @@ struct TRTParams {
     int output_size{1000};
 };
 
+using CudaHostPtr = std::unique_ptr<void, decltype(&cudaFreeHost)>;
+
 class TensorRTModule {
   public:
     TensorRTModule(std::unique_ptr<nvinfer1::ILogger> logger,

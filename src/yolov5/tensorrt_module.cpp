@@ -27,10 +27,8 @@ TensorRTModule::TensorRTModule(std::unique_ptr<nvinfer1::ILogger> logger,
     : m_logger(std::move(logger)), m_params(config) {}
 
 TensorRTModule::~TensorRTModule() {
-    if (deviceInput)
-        cudaFree(deviceInput);
-    if (deviceOutput)
-        cudaFree(deviceOutput);
+    if (m_graphExec)
+        cudaGraphExecDestroy(m_graphExec);
     if (m_stream)
         cudaStreamDestroy(m_stream);
 }
@@ -135,19 +133,22 @@ void TensorRTModule::serializeEngine(std::unique_ptr<nvinfer1::ICudaEngine> &eng
         fmt::format("Engine serialized to {}", engineFilePath).c_str());
 }
 
-bool TensorRTModule::doInference(const float *input, float *output) {
-    CHECK(cudaMemcpyAsync(deviceInput, input,
-                          m_params.batchSize * m_params.channels * m_params.input_h *
-                              m_params.input_w * sizeof(float),
-                          cudaMemcpyHostToDevice, m_stream));
+bool TensorRTModule::doInference() {
+    if (m_graphExec) {
+        const cudaError_t launchStatus = cudaGraphLaunch(m_graphExec, m_stream);
+        if (launchStatus == cudaSuccess)
+            return true;
+
+        m_logger->log(Severity::kWARNING,
+                      fmt::format("CUDA Graph launch failed: {}. Falling back to enqueueV3.",
+                                  cudaGetErrorString(launchStatus))
+                          .c_str());
+    }
+
     if (!m_context->enqueueV3(m_stream)) {
         m_logger->log(Severity::kERROR, "Failed to execute inference.");
         return false;
     }
-    CHECK(cudaMemcpyAsync(output, deviceOutput,
-                          m_params.batchSize * m_params.output_size * sizeof(float),
-                          cudaMemcpyDeviceToHost, m_stream));
-    CHECK(cudaStreamSynchronize(m_stream));
     return true;
 }
 
@@ -195,27 +196,57 @@ void TensorRTModule::initialize(const TRTParams &buildConfig) {
     inputTensorName = m_engine->getIOTensorName(0);
     outputTensorName = m_engine->getIOTensorName(1);
 
-    CHECK(cudaMalloc(&deviceInput,
-                     m_params.batchSize * m_params.channels * m_params.input_h *
-                         m_params.input_w * sizeof(float)));
-    CHECK(cudaMalloc(&deviceOutput,
-                     m_params.batchSize * m_params.output_size * sizeof(float)));
+    const size_t inputSize = m_params.batchSize * m_params.channels *
+                              m_params.input_h * m_params.input_w * sizeof(float);
+    const size_t outputSize = m_params.batchSize * m_params.output_size * sizeof(float);
+
+    void* rawInput  = nullptr;
+    void* rawOutput = nullptr;
+    CHECK(cudaHostAlloc(&rawInput,  inputSize,  cudaHostAllocMapped | cudaHostAllocWriteCombined));
+    CHECK(cudaHostAlloc(&rawOutput, outputSize, cudaHostAllocMapped));
+    m_hostInput  = CudaHostPtr{rawInput,  cudaFreeHost};
+    m_hostOutput = CudaHostPtr{rawOutput, cudaFreeHost};
+    CHECK(cudaHostGetDevicePointer(&deviceInput,  m_hostInput.get(),  0));
+    CHECK(cudaHostGetDevicePointer(&deviceOutput, m_hostOutput.get(), 0));
     CHECK(cudaStreamCreate(&m_stream));
 
     m_context->setTensorAddress(inputTensorName.c_str(), deviceInput);
     m_context->setTensorAddress(outputTensorName.c_str(), deviceOutput);
 
+    if (!buildGraph()) {
+        m_logger->log(Severity::kWARNING,
+                      "CUDA Graph build failed. Falling back to normal enqueueV3.");
+    }
+
     m_logger->log(Severity::kINFO,
                   "TensorRTModule initialized. Resources allocated.");
 }
 
-bool TensorRTModule::infer(const float* input, float* output) {
-    if (input == nullptr || output == nullptr) {
-        m_logger->log(Severity::kERROR, "input or output is null.");
+bool TensorRTModule::infer(const float* input, size_t numElements) {
+    const size_t expected = static_cast<size_t>(m_params.batchSize) * m_params.channels *
+                            m_params.input_h * m_params.input_w;
+    if (input == nullptr) {
+        m_logger->log(Severity::kERROR, "input is null.");
         return false;
     }
+    if (numElements != expected) {
+        m_logger->log(Severity::kERROR,
+                      fmt::format("infer: expected {} elements, got {}.", expected, numElements).c_str());
+        return false;
+    }
+    std::memcpy(m_hostInput.get(), input, expected * sizeof(float));
+    if (!doInference())
+        return false;
 
-    return doInference(input, output);
+    const cudaError_t syncStatus = cudaStreamSynchronize(m_stream);
+    if (syncStatus != cudaSuccess) {
+        m_logger->log(Severity::kERROR,
+                      fmt::format("Inference stream synchronization failed: {}",
+                                  cudaGetErrorString(syncStatus))
+                          .c_str());
+        return false;
+    }
+    return true;
 }
 
 double TensorRTModule::benchmark(int iterations, const float* inputData) {
@@ -224,31 +255,101 @@ double TensorRTModule::benchmark(int iterations, const float* inputData) {
         return 0.0;
     }
 
-    std::vector<float> dummyInput(
-        static_cast<size_t>(m_params.batchSize) *
-        static_cast<size_t>(m_params.channels) *
-        static_cast<size_t>(m_params.input_h) *
-        static_cast<size_t>(m_params.input_w));
-    std::copy(inputData, inputData + dummyInput.size(), dummyInput.begin());
-    std::vector<float> dummyOutput(
-        static_cast<size_t>(m_params.batchSize) *
-        static_cast<size_t>(m_params.output_size));
-
-    // for (int i = 0; i < 10; ++i)
-    //     doInference(dummyInput.data(), dummyOutput.data());
+    const size_t inputSize = static_cast<size_t>(m_params.batchSize) *
+                              m_params.channels * m_params.input_h * m_params.input_w;
+    std::memcpy(m_hostInput.get(), inputData, inputSize * sizeof(float));
 
     auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < iterations; ++i)
-        doInference(dummyInput.data(), dummyOutput.data());
+    for (int i = 0; i < iterations; ++i) {
+        if (!doInference())
+            return 0.0;
+
+        const cudaError_t syncStatus = cudaStreamSynchronize(m_stream);
+        if (syncStatus != cudaSuccess) {
+            m_logger->log(Severity::kERROR,
+                          fmt::format("Benchmark stream synchronization failed: {}",
+                                      cudaGetErrorString(syncStatus))
+                              .c_str());
+            return 0.0;
+        }
+    }
     auto end = std::chrono::high_resolution_clock::now();
 
     double totalMs = std::chrono::duration<double, std::milli>(end - start).count();
     double fps = iterations / (totalMs / 1000.0);
 
-    fmt::print("\\n=== Benchmark ({} iterations) ===\\n", iterations);
-    fmt::print("Total time: {:.2f} ms\\n", totalMs);
-    fmt::print("Avg latency: {:.3f} ms\\n", totalMs / iterations);
-    fmt::print("FPS: {:.1f}\\n", fps);
+    fmt::print("\n=== Benchmark ({} iterations) ===\n", iterations);
+    fmt::print("Total time: {:.2f} ms\n", totalMs);
+    fmt::print("Avg latency: {:.3f} ms\n", totalMs / iterations);
+    fmt::print("FPS: {:.1f}\n", fps);
 
     return fps;
+}
+
+bool TensorRTModule::buildGraph() {
+    m_logger->log(Severity::kINFO, "Starting CUDA Graph capture...");
+    if (m_graphExec) {
+        cudaGraphExecDestroy(m_graphExec);
+        m_graphExec = nullptr;
+    }
+
+    cudaGraph_t graph{nullptr}; // 这是一个临时的“蓝图”
+
+    const auto logCudaWarning = [this](const char* step, cudaError_t status) {
+        m_logger->log(Severity::kWARNING,
+                      fmt::format("CUDA Graph {} failed: {}", step,
+                                  cudaGetErrorString(status))
+                          .c_str());
+    };
+
+    cudaError_t status = cudaStreamSynchronize(m_stream);
+    if (status != cudaSuccess) {
+        logCudaWarning("pre-capture synchronization", status);
+        return false;
+    }
+
+    // 1. 开机：开始录制
+    // cudaStreamCaptureModeGlobal 表示录制期间，这个流上的所有异步操作都会被抓取
+    status = cudaStreamBeginCapture(m_stream, cudaStreamCaptureModeGlobal);
+    if (status != cudaSuccess) {
+        logCudaWarning("begin capture", status);
+        return false;
+    }
+
+    // 2. 演戏：执行推理 API (只准有异步操作！)
+    if (!m_context->enqueueV3(m_stream)) {
+        m_logger->log(Severity::kERROR, "Failed to enqueue during graph capture.");
+        status = cudaStreamEndCapture(m_stream, &graph);
+        if (status == cudaSuccess && graph)
+            cudaGraphDestroy(graph);
+        return false;
+    }
+
+    // 3. 关机：结束录制，蓝图保存在 graph 中
+    status = cudaStreamEndCapture(m_stream, &graph);
+    if (status != cudaSuccess) {
+        logCudaWarning("end capture", status);
+        if (graph)
+            cudaGraphDestroy(graph);
+        return false;
+    }
+
+    // 4. 冲洗底片：把蓝图实例化为真正的“可执行文件” (m_graphExec)
+    // 这一步比较耗时，所以我们放在初始化阶段做
+    status = cudaGraphInstantiate(&m_graphExec, graph, 0);
+    if (status != cudaSuccess) {
+        logCudaWarning("instantiate", status);
+        cudaGraphDestroy(graph);
+        m_graphExec = nullptr;
+        return false;
+    }
+
+    // 5. 销毁蓝图（因为已经有可执行文件了）
+    status = cudaGraphDestroy(graph);
+    if (status != cudaSuccess) {
+        logCudaWarning("destroy temporary graph", status);
+    }
+
+    m_logger->log(Severity::kINFO, "CUDA Graph captured and instantiated successfully.");
+    return true;
 }

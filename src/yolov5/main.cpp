@@ -54,11 +54,11 @@ int main(int argc, char** argv) {
     letterbox(img, sharedCanvas, letterboxResult);
     // 使用dnn模块的blobFromImage函数进行预处理，得到CHW格式的输入数据
     cv::Mat inputBlob = cv::dnn::blobFromImage(sharedCanvas, 1.0 / 255.0, cv::Size(640,640), cv::Scalar(), true, false);
-    std::vector<float> output(params.output_size, 0.0f);
-    if (!trt.infer(inputBlob.ptr<float>(), output.data())) {
+    if (!trt.infer(inputBlob.ptr<float>(), static_cast<size_t>(inputBlob.total()))) {
         fmt::print("Error: TensorRT inference failed.\n");
         return -1;
     }
+    const float* output = trt.getHostOutput();
 
     std::vector<cv::Rect> bboxes;
     std::vector<float> scores;
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     scores.reserve(8400);
     classIds.reserve(8400);
     detections.reserve(8400);
-    postprocessYolov5su(output.data(), img.cols, img.rows,
+    postprocessYolov5su(output, img.cols, img.rows,
                         letterboxResult.r,
                         letterboxResult.dw,
                         letterboxResult.dh,
