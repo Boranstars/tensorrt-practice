@@ -7,7 +7,7 @@
 #include <fmt/core.h>
 #include <memory>
 
-static constexpr std::string_view YOLOV5_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/yolov5su.onnx";
+static constexpr std::string_view YOLOV5_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/yolov5s_nms.onnx";
 static constexpr std::string_view COCO_NAMES_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/coco.names";
 
 namespace fs = std::filesystem;
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
         .channels = 3,
         .input_h = 640,
         .input_w = 640,
-        .output_size = 84 * 8400, // 84 classes * 8400 boxes
+        .output_size = 300 * 6, // [1, 300, 6]: x1, y1, x2, y2, score, class_id
     };
     params.onnxFilePath = YOLOV5_ONNX_MODEL_PATH.data();
 
@@ -60,24 +60,16 @@ int main(int argc, char** argv) {
     }
     const float* output = trt.getHostOutput();
 
-    std::vector<cv::Rect> bboxes;
-    std::vector<float> scores;
-    std::vector<int> classIds;
     std::vector<Detection> detections;
-    bboxes.reserve(8400);
-    scores.reserve(8400);
-    classIds.reserve(8400);
-    detections.reserve(8400);
-    postprocessYolov5su(output, img.cols, img.rows,
-                        letterboxResult.r,
-                        letterboxResult.dw,
-                        letterboxResult.dh,
-                        0.25F,
-                        0.45F,
-                        bboxes,
-                        scores,
-                        classIds,
-                        detections);
+    detections.reserve(300);
+    postprocessYoloNmsOutput(output,
+                             img.cols,
+                             img.rows,
+                             letterboxResult.r,
+                             letterboxResult.dw,
+                             letterboxResult.dh,
+                             0.25F,
+                             detections);
 
     drawDetections(img, detections, classNames);
 

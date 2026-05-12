@@ -19,7 +19,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
-static constexpr std::string_view YOLOV5_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/yolov5su.onnx";
+static constexpr std::string_view YOLOV5_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/yolov5s_nms.onnx";
 static constexpr std::string_view COCO_NAMES_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/coco.names";
 
 namespace {
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
         .channels = 3,
         .input_h = 640,
         .input_w = 640,
-        .output_size = 84 * 8400,
+        .output_size = 300 * 6,
     };
 
     TensorRTModule trt(std::move(logger), params);
@@ -141,14 +141,8 @@ int main(int argc, char** argv) {
         int frameCount = 0;
         cv::Mat shared_canvas(params.input_h, params.input_w, CV_8UC3);
         LetterboxResult box_info;
-        std::vector<cv::Rect> bboxes;
-        std::vector<float> scores;
-        std::vector<int> classIds;
         std::vector<Detection> finalDets;
-        bboxes.reserve(8400);
-        scores.reserve(8400);
-        classIds.reserve(8400);
-        finalDets.reserve(8400);
+        finalDets.reserve(300);
 
         while (!stopRequested.load()) {
             cv::Mat frame;
@@ -196,16 +190,14 @@ int main(int argc, char** argv) {
             auto inferEnd = std::chrono::steady_clock::now();
             const auto t_infer = inferEnd;
 
-            postprocessYolov5su(trt.getHostOutput(), frame.cols, frame.rows,
-                                box_info.r,
-                                box_info.dw,
-                                box_info.dh,
-                                0.25F,
-                                0.45F,
-                                bboxes,
-                                scores,
-                                classIds,
-                                finalDets);
+            postprocessYoloNmsOutput(trt.getHostOutput(),
+                                     frame.cols,
+                                     frame.rows,
+                                     box_info.r,
+                                     box_info.dw,
+                                     box_info.dh,
+                                     0.25F,
+                                     finalDets);
             const auto t_post = std::chrono::steady_clock::now();
             drawDetections(frame, finalDets, classNames);
 

@@ -121,6 +121,58 @@ void postprocessYolov5su(
     }
 }
 
+void postprocessYoloNmsOutput(
+    const float* output,
+    int originalW,
+    int originalH,
+    float r,
+    int dw,
+    int dh,
+    float scoreThreshold,
+    std::vector<Detection>& finalDetections) {
+    static constexpr int kMaxDetections = 300;
+    static constexpr int kNumAttrs = 6;
+
+    finalDetections.clear();
+
+    if (output == nullptr || originalW <= 0 || originalH <= 0 || r <= 0.0F) {
+        return;
+    }
+
+    for (int i = 0; i < kMaxDetections; ++i) {
+        const float* det = output + i * kNumAttrs;
+
+        float x1 = det[0];
+        float y1 = det[1];
+        float x2 = det[2];
+        float y2 = det[3];
+        const float score = det[4];
+        const int classId = static_cast<int>(std::round(det[5]));
+
+        if (score < scoreThreshold) {
+            continue;
+        }
+
+        x1 = (x1 - static_cast<float>(dw)) / r;
+        y1 = (y1 - static_cast<float>(dh)) / r;
+        x2 = (x2 - static_cast<float>(dw)) / r;
+        y2 = (y2 - static_cast<float>(dh)) / r;
+
+        const int left = std::max(0, static_cast<int>(std::round(x1)));
+        const int top = std::max(0, static_cast<int>(std::round(y1)));
+        const int right = std::min(originalW, static_cast<int>(std::round(x2)));
+        const int bottom = std::min(originalH, static_cast<int>(std::round(y2)));
+
+        const int boxW = right - left;
+        const int boxH = bottom - top;
+        if (boxW <= 0 || boxH <= 0) {
+            continue;
+        }
+
+        finalDetections.push_back(Detection{cv::Rect(left, top, boxW, boxH), classId, score});
+    }
+}
+
 std::vector<std::string> loadClassNames(const std::string& filePath) {
     std::vector<std::string> names;
     std::ifstream ifs(filePath);

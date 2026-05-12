@@ -35,6 +35,16 @@ void postprocessYolov5su(
     std::vector<int>& classIds,
     std::vector<Detection>& finalDetections);
 
+void postprocessYoloNmsOutput(
+    const float* output,
+    int originalW,
+    int originalH,
+    float r,
+    int dw,
+    int dh,
+    float scoreThreshold,
+    std::vector<Detection>& finalDetections);
+
 std::vector<std::string> loadClassNames(const std::string& filePath);
 
 void drawDetections(cv::Mat& image,
