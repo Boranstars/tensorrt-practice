@@ -8,14 +8,22 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 
-LetterboxResult letterbox(const cv::Mat& src,
-                          int targetW,
-                          int targetH,
-                          const cv::Scalar& padColor) {
-    LetterboxResult result;
-    if (src.empty() || targetW <= 0 || targetH <= 0) {
-        return result;
+void letterbox(const cv::Mat& src,
+               cv::Mat& canvas,
+               LetterboxResult& result,
+               const cv::Scalar& padColor) {
+    result = LetterboxResult{};
+    if (src.empty() || canvas.empty() || canvas.type() != CV_8UC3) {
+        return;
     }
+
+    const int targetW = canvas.cols;
+    const int targetH = canvas.rows;
+    if (targetW <= 0 || targetH <= 0) {
+        return;
+    }
+
+    canvas.setTo(padColor);
 
     const int oriW = src.cols;
     const int oriH = src.rows;
@@ -25,26 +33,20 @@ LetterboxResult letterbox(const cv::Mat& src,
     const int resizedW = static_cast<int>(std::round(static_cast<float>(oriW) * result.r));
     const int resizedH = static_cast<int>(std::round(static_cast<float>(oriH) * result.r));
 
-    cv::Mat resized;
-    cv::resize(src, resized, cv::Size(resizedW, resizedH), 0.0, 0.0, cv::INTER_LINEAR);
-
     const int padW = targetW - resizedW;
     const int padH = targetH - resizedH;
 
     const int left = padW / 2;
-    const int right = padW - left;
     const int top = padH / 2;
-    const int bottom = padH - top;
 
     result.dw = left;
     result.dh = top;
 
-    cv::copyMakeBorder(resized, result.image, top, bottom, left, right,
-                       cv::BORDER_CONSTANT, padColor);
-    return result;
+    cv::Mat roi = canvas(cv::Rect(left, top, resizedW, resizedH));
+    cv::resize(src, roi, cv::Size(resizedW, resizedH), 0.0, 0.0, cv::INTER_LINEAR);
 }
 
-std::vector<Detection> postprocessYolov5su(
+void postprocessYolov5su(
     const float* output,
     int originalW,
     int originalH,
@@ -52,21 +54,22 @@ std::vector<Detection> postprocessYolov5su(
     int dw,
     int dh,
     float scoreThreshold,
-    float nmsThreshold) {
+    float nmsThreshold,
+    std::vector<cv::Rect>& boxes,
+    std::vector<float>& scores,
+    std::vector<int>& classIds,
+    std::vector<Detection>& finalDetections) {
     static constexpr int kNumAttrs = 84;
     static constexpr int kNumCandidates = 8400;
 
-    std::vector<Detection> finalDetections;
-    if (output == nullptr || originalW <= 0 || originalH <= 0 || r <= 0.0F) {
-        return finalDetections;
-    }
+    boxes.clear();
+    scores.clear();
+    classIds.clear();
+    finalDetections.clear();
 
-    std::vector<cv::Rect> boxes;
-    std::vector<float> scores;
-    std::vector<int> classIds;
-    boxes.reserve(kNumCandidates);
-    scores.reserve(kNumCandidates);
-    classIds.reserve(kNumCandidates);
+    if (output == nullptr || originalW <= 0 || originalH <= 0 || r <= 0.0F) {
+        return;
+    }
 
     for (int i = 0; i < kNumCandidates; ++i) {
         const float cx = output[0 * kNumCandidates + i];
@@ -116,7 +119,6 @@ std::vector<Detection> postprocessYolov5su(
     for (int idx : kept) {
         finalDetections.push_back(Detection{boxes[idx], classIds[idx], scores[idx]});
     }
-    return finalDetections;
 }
 
 std::vector<std::string> loadClassNames(const std::string& filePath) {

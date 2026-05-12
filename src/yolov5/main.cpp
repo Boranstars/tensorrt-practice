@@ -49,19 +49,35 @@ int main(int argc, char** argv) {
 
     const auto classNames = loadClassNames(std::string(COCO_NAMES_PATH));
 
-    auto letterboxResult = letterbox(img, params.input_w, params.input_h);
+    cv::Mat sharedCanvas(params.input_h, params.input_w, CV_8UC3);
+    LetterboxResult letterboxResult;
+    letterbox(img, sharedCanvas, letterboxResult);
     // 使用dnn模块的blobFromImage函数进行预处理，得到CHW格式的输入数据
-    cv::Mat inputBlob = cv::dnn::blobFromImage(letterboxResult.image, 1.0 / 255.0, cv::Size(640,640), cv::Scalar(), true, false);
+    cv::Mat inputBlob = cv::dnn::blobFromImage(sharedCanvas, 1.0 / 255.0, cv::Size(640,640), cv::Scalar(), true, false);
     std::vector<float> output(params.output_size, 0.0f);
     if (!trt.infer(inputBlob.ptr<float>(), output.data())) {
         fmt::print("Error: TensorRT inference failed.\n");
         return -1;
     }
 
-    auto detections = postprocessYolov5su(output.data(), img.cols, img.rows,
-                                          letterboxResult.r,
-                                          letterboxResult.dw,
-                                          letterboxResult.dh);
+    std::vector<cv::Rect> bboxes;
+    std::vector<float> scores;
+    std::vector<int> classIds;
+    std::vector<Detection> detections;
+    bboxes.reserve(8400);
+    scores.reserve(8400);
+    classIds.reserve(8400);
+    detections.reserve(8400);
+    postprocessYolov5su(output.data(), img.cols, img.rows,
+                        letterboxResult.r,
+                        letterboxResult.dw,
+                        letterboxResult.dh,
+                        0.25F,
+                        0.45F,
+                        bboxes,
+                        scores,
+                        classIds,
+                        detections);
 
     drawDetections(img, detections, classNames);
 
@@ -76,5 +92,7 @@ int main(int argc, char** argv) {
     fmt::print("Detections: {}\n", detections.size());
     fmt::print("Saved result image: {}\n", outputPath.string());
     
+
+    trt.benchmark(1000, inputBlob.ptr<float>());
     return 0;
 }
