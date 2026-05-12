@@ -235,6 +235,15 @@ bool TensorRTModule::infer(const float* input, size_t numElements) {
         return false;
     }
     std::memcpy(m_hostInput.get(), input, expected * sizeof(float));
+    return inferFromHostBuffer();
+}
+
+bool TensorRTModule::inferFromHostBuffer() {
+    if (!m_context || !m_hostInput || !m_hostOutput || !m_stream) {
+        m_logger->log(Severity::kERROR, "TensorRTModule is not initialized.");
+        return false;
+    }
+
     if (!doInference())
         return false;
 

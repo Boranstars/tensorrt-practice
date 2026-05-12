@@ -33,6 +33,7 @@ class TensorRTModule {
 
     // 核心接口：指针 + 元素数，内部校验长度
     bool infer(const float* input, size_t numElements);
+    bool inferFromHostBuffer();
 
 #if defined(__cpp_lib_span)
     // C++20：span 重载，自动携带长度
