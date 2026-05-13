@@ -48,26 +48,20 @@ void letterbox(const cv::Mat& src,
 
 void postprocessYolov5su(
     const float* output,
-    int originalW,
-    int originalH,
-    float r,
-    int dw,
-    int dh,
-    float scoreThreshold,
-    float nmsThreshold,
+    const PostProcessConfig& config,
     std::vector<cv::Rect>& boxes,
     std::vector<float>& scores,
     std::vector<int>& classIds,
     std::vector<Detection>& finalDetections) {
-    static constexpr int kNumAttrs = 84;
-    static constexpr int kNumCandidates = 8400;
+    const int kNumAttrs      = 4 + config.num_classes;
+    const int kNumCandidates = config.num_boxes;
 
     boxes.clear();
     scores.clear();
     classIds.clear();
     finalDetections.clear();
 
-    if (output == nullptr || originalW <= 0 || originalH <= 0 || r <= 0.0F) {
+    if (output == nullptr || config.originalW <= 0 || config.originalH <= 0 || config.r <= 0.0F) {
         return;
     }
 
@@ -87,19 +81,19 @@ void postprocessYolov5su(
             }
         }
 
-        if (bestScore <= scoreThreshold) {
+        if (bestScore <= config.scoreThreshold) {
             continue;
         }
 
-        const float x1 = (cx - 0.5F * w - static_cast<float>(dw)) / r;
-        const float y1 = (cy - 0.5F * h - static_cast<float>(dh)) / r;
-        const float x2 = (cx + 0.5F * w - static_cast<float>(dw)) / r;
-        const float y2 = (cy + 0.5F * h - static_cast<float>(dh)) / r;
+        const float x1 = (cx - 0.5F * w - static_cast<float>(config.dw)) / config.r;
+        const float y1 = (cy - 0.5F * h - static_cast<float>(config.dh)) / config.r;
+        const float x2 = (cx + 0.5F * w - static_cast<float>(config.dw)) / config.r;
+        const float y2 = (cy + 0.5F * h - static_cast<float>(config.dh)) / config.r;
 
         const int left = std::max(0, static_cast<int>(std::round(x1)));
         const int top = std::max(0, static_cast<int>(std::round(y1)));
-        const int right = std::min(originalW, static_cast<int>(std::round(x2)));
-        const int bottom = std::min(originalH, static_cast<int>(std::round(y2)));
+        const int right = std::min(config.originalW, static_cast<int>(std::round(x2)));
+        const int bottom = std::min(config.originalH, static_cast<int>(std::round(y2)));
 
         const int boxW = right - left;
         const int boxH = bottom - top;
@@ -113,7 +107,7 @@ void postprocessYolov5su(
     }
 
     std::vector<int> kept;
-    cv::dnn::NMSBoxes(boxes, scores, scoreThreshold, nmsThreshold, kept);
+    cv::dnn::NMSBoxes(boxes, scores, config.scoreThreshold, config.nmsThreshold, kept);
 
     finalDetections.reserve(kept.size());
     for (int idx : kept) {

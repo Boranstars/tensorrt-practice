@@ -32,10 +32,6 @@ struct TRTParams {
     bool useDLA{false};
     bool useFP16{true};
     int batchSize{1};
-    int channels{3};
-    int input_h{224};
-    int input_w{224};
-    int output_size{1000};
 };
 
 class TensorRTModule {

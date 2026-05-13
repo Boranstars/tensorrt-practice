@@ -67,20 +67,14 @@ int main(int argc, char** argv) {
         .onnxFilePath = YOLOV5_ONNX_MODEL_PATH.data(),
         .useDLA = false,
         .useFP16 = true,
-        .batchSize = 1,
-        .channels = 3,
-        .input_h = 640,
-        .input_w = 640,
-        .output_size = 84 * 8400,
     };
 
     TensorRTModule trt(std::move(logger), params);
     trt.initialize();
 
-    const size_t inputElems = static_cast<size_t>(params.batchSize) *
-                              static_cast<size_t>(params.channels) *
-                              static_cast<size_t>(params.input_h) *
-                              static_cast<size_t>(params.input_w);
+    const auto& inputMeta = trt.getInputTensorMetadata();
+    const int input_h = inputMeta.dims.d[2];
+    const int input_w = inputMeta.dims.d[3];
 
     const auto classNames = loadClassNames(std::string(COCO_NAMES_PATH));
 
@@ -139,16 +133,20 @@ int main(int argc, char** argv) {
 
     std::thread inferThread([&]() {
         int frameCount = 0;
-        cv::Mat shared_canvas(params.input_h, params.input_w, CV_8UC3);
+        cv::Mat shared_canvas(input_h, input_w, CV_8UC3);
         LetterboxResult box_info;
+        const auto& outDims = trt.getOutputTensorMetadata().dims;
+        PostProcessConfig ppCfg;
+        ppCfg.num_classes = outDims.d[1] - 4;
+        ppCfg.num_boxes   = outDims.d[2];
         std::vector<cv::Rect> bboxes;
         std::vector<float> scores;
         std::vector<int> classIds;
         std::vector<Detection> finalDets;
-        bboxes.reserve(8400);
-        scores.reserve(8400);
-        classIds.reserve(8400);
-        finalDets.reserve(8400);
+        bboxes.reserve(ppCfg.num_boxes);
+        scores.reserve(ppCfg.num_boxes);
+        classIds.reserve(ppCfg.num_boxes);
+        finalDets.reserve(ppCfg.num_boxes);
 
         while (!stopRequested.load()) {
             cv::Mat frame;
@@ -179,11 +177,11 @@ int main(int argc, char** argv) {
             rgbFloat.convertTo(rgbFloat, CV_32FC3, 1.0 / 255.0);
 
             float* hostInput = trt.getHostInput();
-            const size_t hw = static_cast<size_t>(params.input_h) * params.input_w;
+            const size_t hw = static_cast<size_t>(input_h) * input_w;
             std::array<cv::Mat, 3> chw{
-                cv::Mat(params.input_h, params.input_w, CV_32FC1, hostInput + 0 * hw),
-                cv::Mat(params.input_h, params.input_w, CV_32FC1, hostInput + 1 * hw),
-                cv::Mat(params.input_h, params.input_w, CV_32FC1, hostInput + 2 * hw),
+                cv::Mat(input_h, input_w, CV_32FC1, hostInput + 0 * hw),
+                cv::Mat(input_h, input_w, CV_32FC1, hostInput + 1 * hw),
+                cv::Mat(input_h, input_w, CV_32FC1, hostInput + 2 * hw),
             };
             cv::split(rgbFloat, chw);
             const auto t_pre = std::chrono::steady_clock::now();
@@ -196,16 +194,13 @@ int main(int argc, char** argv) {
             auto inferEnd = std::chrono::steady_clock::now();
             const auto t_infer = inferEnd;
 
-            postprocessYolov5su(trt.getHostOutput(), frame.cols, frame.rows,
-                                box_info.r,
-                                box_info.dw,
-                                box_info.dh,
-                                0.25F,
-                                0.45F,
-                                bboxes,
-                                scores,
-                                classIds,
-                                finalDets);
+            ppCfg.originalW = frame.cols;
+            ppCfg.originalH = frame.rows;
+            ppCfg.r  = box_info.r;
+            ppCfg.dw = box_info.dw;
+            ppCfg.dh = box_info.dh;
+            postprocessYolov5su(trt.getHostOutput(), ppCfg,
+                                bboxes, scores, classIds, finalDets);
             const auto t_post = std::chrono::steady_clock::now();
             drawDetections(frame, finalDets, classNames);
 

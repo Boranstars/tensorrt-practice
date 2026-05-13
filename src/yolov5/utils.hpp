@@ -16,6 +16,18 @@ struct Detection {
     float score{0.0F};
 };
 
+struct PostProcessConfig {
+    int num_classes;  // 动态获取：比如 80
+    int num_boxes;    // 动态获取：比如 8400
+    int originalW;
+    int originalH;
+    float r;
+    int dw;
+    int dh;
+    float scoreThreshold = 0.25f;
+    float nmsThreshold = 0.45f;
+};
+
 void letterbox(const cv::Mat& src,
                cv::Mat& canvas,
                LetterboxResult& result,
@@ -23,13 +35,7 @@ void letterbox(const cv::Mat& src,
 
 void postprocessYolov5su(
     const float* output,
-    int originalW,
-    int originalH,
-    float r,
-    int dw,
-    int dh,
-    float scoreThreshold,
-    float nmsThreshold,
+    const PostProcessConfig& config,
     std::vector<cv::Rect>& boxes,
     std::vector<float>& scores,
     std::vector<int>& classIds,
