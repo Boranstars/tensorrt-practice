@@ -14,11 +14,15 @@ struct Detection {
     cv::Rect box;
     int classId{-1};
     float score{0.0F};
+    std::vector<cv::Point2f> keypoints;
+    std::vector<float> keypointScores;
+    float keypointThreshold{0.25F};
 };
 
 struct PostProcessConfig {
     int num_classes;  // 动态获取：比如 80
     int num_boxes;    // 动态获取：比如 8400
+    int num_keypoints{0};
     int originalW;
     int originalH;
     float r;
@@ -26,6 +30,7 @@ struct PostProcessConfig {
     int dh;
     float scoreThreshold = 0.25f;
     float nmsThreshold = 0.45f;
+    float keypointThreshold = 0.25f;
 };
 
 void letterbox(const cv::Mat& src,

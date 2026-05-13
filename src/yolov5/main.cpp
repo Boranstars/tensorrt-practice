@@ -5,10 +5,14 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/dnn.hpp>
 #include <fmt/core.h>
+#include <array>
 #include <memory>
 
-static constexpr std::string_view YOLOV5_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/yolov5su.onnx";
-static constexpr std::string_view COCO_NAMES_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/coco.names";
+static constexpr std::string_view YOLOV8_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/best.onnx";
+static const std::array<std::string, 14> AUTOAIM_CLASS_NAMES{
+    "B1", "B2", "B3", "B4", "B5", "BO", "BS",
+    "R1", "R2", "R3", "R4", "R5", "RO", "RS",
+};
 
 namespace fs = std::filesystem;
 
@@ -25,20 +29,14 @@ int main(int argc, char** argv) {
     auto logger = std::make_unique<Logger>(Severity::kINFO);
 
     TRTParams params {
-        .onnxFilePath = YOLOV5_ONNX_MODEL_PATH.data(),
+        .onnxFilePath = YOLOV8_ONNX_MODEL_PATH.data(),
         .useDLA = false,
         .useFP16 = true,
-        // .batchSize = 1,
-        // .channels = 3,
-        // .input_h = 640,
-        // .input_w = 640,
-        // .output_size = 84 * 8400, // 84 classes * 8400 boxes
     };
-    params.onnxFilePath = YOLOV5_ONNX_MODEL_PATH.data();
 
     TensorRTModule trt(std::move(logger), params);
     trt.initialize();   
-    fmt::print("yolov5_demo scaffold is ready.\n");
+    fmt::print("yolov8 autoaim demo scaffold is ready.\n");
 
     // 推理：
     cv::Mat img = cv::imread(imagePath);
@@ -51,7 +49,8 @@ int main(int argc, char** argv) {
     const int input_h = inputMeta.dims.d[2];
     const int input_w = inputMeta.dims.d[3];
 
-    const auto classNames = loadClassNames(std::string(COCO_NAMES_PATH));
+    const std::vector<std::string> classNames(AUTOAIM_CLASS_NAMES.begin(),
+                                              AUTOAIM_CLASS_NAMES.end());
 
     cv::Mat sharedCanvas(input_h, input_w, CV_8UC3);
     LetterboxResult letterboxResult;
@@ -74,8 +73,15 @@ int main(int argc, char** argv) {
     }
     fmt::print("\n");
 
-    int num_attributes = outdims.d[1]; // 每个候选框的属性数量（4个坐标 + 类别分数）
-    int num_boxes = outdims.d[2]; // 候选框数量
+    constexpr int kAutoaimNumClasses = static_cast<int>(AUTOAIM_CLASS_NAMES.size());
+    constexpr int kKeypointAttrs = 3;
+    const int num_attributes = outdims.d[1];
+    const int num_boxes = outdims.d[2];
+    const int num_keypoints = (num_attributes - 4 - kAutoaimNumClasses) / kKeypointAttrs;
+    if (num_attributes != 30 || num_keypoints != 4) {
+        fmt::print("Warning: unexpected autoaim output layout, attrs={}, keypoints={}\n",
+                   num_attributes, num_keypoints);
+    }
     std::vector<cv::Rect> bboxes;
     std::vector<float> scores;
     std::vector<int> classIds;
@@ -86,8 +92,9 @@ int main(int argc, char** argv) {
     detections.reserve(num_boxes);
 
     PostProcessConfig config;
-    config.num_classes = num_attributes - 4; // 类别分数数量 = 总属性数量 - 4（坐标）
+    config.num_classes = kAutoaimNumClasses;
     config.num_boxes = num_boxes;
+    config.num_keypoints = num_keypoints;
     config.originalW = img.cols;
     config.originalH = img.rows;    
     config.r = letterboxResult.r;

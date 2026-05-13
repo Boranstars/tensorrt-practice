@@ -19,8 +19,11 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
-static constexpr std::string_view YOLOV5_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/yolov5su.onnx";
-static constexpr std::string_view COCO_NAMES_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/coco.names";
+static constexpr std::string_view YOLOV8_ONNX_MODEL_PATH = "/home/jetson/Programs/tensorrt/tensorrt-practice/src/yolov5/models/best.onnx";
+static const std::array<std::string, 14> AUTOAIM_CLASS_NAMES{
+    "B1", "B2", "B3", "B4", "B5", "BO", "BS",
+    "R1", "R2", "R3", "R4", "R5", "RO", "RS",
+};
 
 namespace {
 
@@ -64,7 +67,7 @@ int main(int argc, char** argv) {
 
     auto logger = std::make_unique<Logger>(nvinfer1::ILogger::Severity::kINFO);
     TRTParams params{
-        .onnxFilePath = YOLOV5_ONNX_MODEL_PATH.data(),
+        .onnxFilePath = YOLOV8_ONNX_MODEL_PATH.data(),
         .useDLA = false,
         .useFP16 = true,
     };
@@ -76,7 +79,8 @@ int main(int argc, char** argv) {
     const int input_h = inputMeta.dims.d[2];
     const int input_w = inputMeta.dims.d[3];
 
-    const auto classNames = loadClassNames(std::string(COCO_NAMES_PATH));
+    const std::vector<std::string> classNames(AUTOAIM_CLASS_NAMES.begin(),
+                                              AUTOAIM_CLASS_NAMES.end());
 
     cv::VideoCapture cap;
     if (isInteger(source)) {
@@ -136,9 +140,16 @@ int main(int argc, char** argv) {
         cv::Mat shared_canvas(input_h, input_w, CV_8UC3);
         LetterboxResult box_info;
         const auto& outDims = trt.getOutputTensorMetadata().dims;
+        constexpr int kAutoaimNumClasses = static_cast<int>(AUTOAIM_CLASS_NAMES.size());
+        constexpr int kKeypointAttrs = 3;
         PostProcessConfig ppCfg;
-        ppCfg.num_classes = outDims.d[1] - 4;
+        ppCfg.num_classes = kAutoaimNumClasses;
         ppCfg.num_boxes   = outDims.d[2];
+        ppCfg.num_keypoints = (outDims.d[1] - 4 - kAutoaimNumClasses) / kKeypointAttrs;
+        if (outDims.d[1] != 30 || ppCfg.num_keypoints != 4) {
+            fmt::print("Warning: unexpected autoaim output layout, attrs={}, keypoints={}\n",
+                       outDims.d[1], ppCfg.num_keypoints);
+        }
         std::vector<cv::Rect> bboxes;
         std::vector<float> scores;
         std::vector<int> classIds;

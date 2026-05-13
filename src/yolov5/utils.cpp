@@ -8,6 +8,14 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 
+namespace {
+
+float clampFloat(float value, float low, float high) {
+    return std::max(low, std::min(value, high));
+}
+
+}  // namespace
+
 void letterbox(const cv::Mat& src,
                cv::Mat& canvas,
                LetterboxResult& result,
@@ -53,13 +61,16 @@ void postprocessYolov5su(
     std::vector<float>& scores,
     std::vector<int>& classIds,
     std::vector<Detection>& finalDetections) {
-    const int kNumAttrs      = 4 + config.num_classes;
     const int kNumCandidates = config.num_boxes;
+    const int kClassStart = 4;
+    const int kKeypointStart = kClassStart + config.num_classes;
 
     boxes.clear();
     scores.clear();
     classIds.clear();
     finalDetections.clear();
+
+    std::vector<int> candidateIndices;
 
     if (output == nullptr || config.originalW <= 0 || config.originalH <= 0 || config.r <= 0.0F) {
         return;
@@ -73,11 +84,12 @@ void postprocessYolov5su(
 
         int bestClass = -1;
         float bestScore = -std::numeric_limits<float>::infinity();
-        for (int attr = 4; attr < kNumAttrs; ++attr) {
-            const float s = output[attr * kNumCandidates + i];
+        for (int attr = 0; attr < config.num_classes; ++attr) {
+            const int outputAttr = kClassStart + attr;
+            const float s = output[outputAttr * kNumCandidates + i];
             if (s > bestScore) {
                 bestScore = s;
-                bestClass = attr - 4;
+                bestClass = attr;
             }
         }
 
@@ -104,6 +116,7 @@ void postprocessYolov5su(
         boxes.emplace_back(left, top, boxW, boxH);
         scores.push_back(bestScore);
         classIds.push_back(bestClass);
+        candidateIndices.push_back(i);
     }
 
     std::vector<int> kept;
@@ -111,7 +124,27 @@ void postprocessYolov5su(
 
     finalDetections.reserve(kept.size());
     for (int idx : kept) {
-        finalDetections.push_back(Detection{boxes[idx], classIds[idx], scores[idx]});
+        Detection det{boxes[idx], classIds[idx], scores[idx]};
+        det.keypointThreshold = config.keypointThreshold;
+        if (config.num_keypoints > 0) {
+            const int candidateIdx = candidateIndices[idx];
+            det.keypoints.reserve(config.num_keypoints);
+            det.keypointScores.reserve(config.num_keypoints);
+            for (int k = 0; k < config.num_keypoints; ++k) {
+                const int baseAttr = kKeypointStart + k * 3;
+                const float rawX = output[(baseAttr + 0) * kNumCandidates + candidateIdx];
+                const float rawY = output[(baseAttr + 1) * kNumCandidates + candidateIdx];
+                const float conf = output[(baseAttr + 2) * kNumCandidates + candidateIdx];
+
+                const float x = (rawX - static_cast<float>(config.dw)) / config.r;
+                const float y = (rawY - static_cast<float>(config.dh)) / config.r;
+                det.keypoints.emplace_back(
+                    clampFloat(x, 0.0F, static_cast<float>(config.originalW - 1)),
+                    clampFloat(y, 0.0F, static_cast<float>(config.originalH - 1)));
+                det.keypointScores.push_back(conf);
+            }
+        }
+        finalDetections.push_back(std::move(det));
     }
 }
 
@@ -154,5 +187,24 @@ void drawDetections(cv::Mat& image,
         cv::putText(image, label, cv::Point(textX + 2, textY),
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1,
                     cv::LINE_AA);
+
+        static const cv::Scalar kKeypointColors[] = {
+            cv::Scalar(0, 0, 255),
+            cv::Scalar(255, 0, 0),
+            cv::Scalar(0, 255, 255),
+            cv::Scalar(255, 0, 255),
+        };
+        for (size_t i = 0; i < det.keypoints.size(); ++i) {
+            const float kpScore = i < det.keypointScores.size() ? det.keypointScores[i] : 1.0F;
+            if (kpScore < det.keypointThreshold) {
+                continue;
+            }
+            const cv::Point center(static_cast<int>(std::round(det.keypoints[i].x)),
+                                   static_cast<int>(std::round(det.keypoints[i].y)));
+            cv::circle(image, center, 4, kKeypointColors[i % 4], cv::FILLED, cv::LINE_AA);
+            cv::putText(image, std::to_string(i), center + cv::Point(4, -4),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.45, kKeypointColors[i % 4], 1,
+                        cv::LINE_AA);
+        }
     }
 }
