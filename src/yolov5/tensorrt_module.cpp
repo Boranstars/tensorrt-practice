@@ -3,10 +3,12 @@
 #include <NvOnnxParser.h>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cuda_runtime_api.h>
 #include <filesystem>
 #include <fmt/core.h>
 #include <fstream>
+#include <limits>
 #include <vector>
 
 #define CHECK(status)                                                          \
@@ -21,6 +23,98 @@
 
 namespace fs = std::filesystem;
 using namespace nvinfer1;
+
+namespace {
+
+size_t dataTypeSize(nvinfer1::DataType dataType) {
+    switch (dataType) {
+    case nvinfer1::DataType::kFLOAT:
+        return 4;
+    case nvinfer1::DataType::kHALF:
+        return 2;
+    case nvinfer1::DataType::kINT8:
+        return 1;
+    case nvinfer1::DataType::kINT32:
+        return 4;
+    case nvinfer1::DataType::kBOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+const char* tensorModeName(nvinfer1::TensorIOMode mode) {
+    switch (mode) {
+    case nvinfer1::TensorIOMode::kINPUT:
+        return "input";
+    case nvinfer1::TensorIOMode::kOUTPUT:
+        return "output";
+    default:
+        return "unknown";
+    }
+}
+
+std::string dimsToString(const nvinfer1::Dims& dims) {
+    if (dims.nbDims == 0)
+        return "scalar";
+
+    std::string dimsStr;
+    for (int i = 0; i < dims.nbDims; ++i) {
+        dimsStr += std::to_string(dims.d[i]);
+        if (i < dims.nbDims - 1)
+            dimsStr += " x ";
+    }
+    return dimsStr;
+}
+
+bool volume(const nvinfer1::Dims& dims, size_t& elementCount) {
+    elementCount = 1;
+    for (int i = 0; i < dims.nbDims; ++i) {
+        if (dims.d[i] <= 0)
+            return false;
+
+        const auto dim = static_cast<size_t>(dims.d[i]);
+        if (elementCount > std::numeric_limits<size_t>::max() / dim)
+            return false;
+
+        elementCount *= dim;
+    }
+    return true;
+}
+
+} // namespace
+
+bool TensorMetadata::syncFromEngine(nvinfer1::ICudaEngine* engine,
+                                    nvinfer1::IExecutionContext* context,
+                                    int tensorIndex) {
+    if (engine == nullptr || context == nullptr)
+        return false;
+
+    const char* tensorName = engine->getIOTensorName(tensorIndex);
+    if (tensorName == nullptr)
+        return false;
+
+    TensorMetadata metadata;
+    metadata.index = tensorIndex;
+    metadata.name = tensorName;
+    metadata.mode = engine->getTensorIOMode(tensorName);
+    metadata.dims = context->getTensorShape(tensorName);
+    metadata.dataType = engine->getTensorDataType(tensorName);
+
+    if (!volume(metadata.dims, metadata.elementCount))
+        return false;
+
+    const size_t elementSize = dataTypeSize(metadata.dataType);
+    if (elementSize == 0)
+        return false;
+
+    if (metadata.elementCount > std::numeric_limits<size_t>::max() / elementSize)
+        return false;
+
+    metadata.byteSize = metadata.elementCount * elementSize;
+    *this = std::move(metadata);
+    return true;
+}
 
 TensorRTModule::TensorRTModule(std::unique_ptr<nvinfer1::ILogger> logger,
                                const TRTParams &config)
@@ -44,26 +138,102 @@ void TensorRTModule::parserModel(const std::string &onnxFilePath,
     }
 }
 
-void TensorRTModule::checkEngine(nvinfer1::ICudaEngine *engine) 
-{
+void TensorRTModule::checkEngine(nvinfer1::ICudaEngine *engine,
+                                 nvinfer1::IExecutionContext *context) {
 
-    if (engine == nullptr) {
-        m_logger->log(Severity::kERROR, "engine is null.");
+    if (engine == nullptr || context == nullptr) {
+        m_logger->log(Severity::kERROR, "engine or context is null, cannot check engine.");
         return;
     }
     int nbBindings = engine->getNbIOTensors();
     m_logger->log(Severity::kINFO, fmt::format("Number of bindings: {}", nbBindings).c_str());
-    for (int i = 0; i < nbBindings; i++)
-    {
-        auto tenorName = engine->getIOTensorName(i);
-        m_logger->log(Severity::kINFO, fmt::format("Binding {}: {}", i, tenorName).c_str());
+    for (int i = 0; i < nbBindings; i++) {
+        auto tensorName = engine->getIOTensorName(i);
+        auto tensorMode = engine->getTensorIOMode(tensorName);
+        auto dataType = engine->getTensorDataType(tensorName);
+        auto dims = context->getTensorShape(tensorName);
 
+        size_t elementCount{0};
+        const bool hasStaticShape = volume(dims, elementCount);
+        const size_t elementSize = dataTypeSize(dataType);
+        const size_t byteSize = hasStaticShape ? elementCount * elementSize : 0;
+
+        m_logger->log(Severity::kINFO,
+                      fmt::format("Binding {}: {} ({})", i, tensorName,
+                                  tensorModeName(tensorMode))
+                          .c_str());
+
+        // 检测类型，是输入还是输出
+        if (tensorMode == TensorIOMode::kINPUT) {
+            m_logger->log(Severity::kINFO, "This binding is an input.");
+        } else if (tensorMode == TensorIOMode::kOUTPUT) {
+            m_logger->log(Severity::kINFO, "This binding is an output.");
+        } else {
+            m_logger->log(Severity::kWARNING, "Unknown tensor I/O mode.");
+        }
+
+        // 检测维度
+        m_logger->log(Severity::kINFO,
+                      fmt::format("Dimensions for {}: {}", tensorName,
+                                  dimsToString(dims))
+                          .c_str());
+        m_logger->log(Severity::kINFO,
+                      fmt::format("Tensor {} elements: {}, bytes: {}",
+                                  tensorName, hasStaticShape ? elementCount : 0,
+                                  byteSize)
+                          .c_str());
 
     }
     int nbLayers = engine->getNbLayers();
     m_logger->log(Severity::kINFO, fmt::format("Number of layers: {}", nbLayers).c_str());
+}
 
+bool TensorRTModule::cacheEngineIO(nvinfer1::ICudaEngine *engine,
+                                   nvinfer1::IExecutionContext *context) {
+    if (engine == nullptr || context == nullptr) {
+        m_logger->log(Severity::kERROR, "engine or context is null, cannot cache engine I/O.");
+        return false;
+    }
 
+    std::vector<TensorMetadata> inputTensors;
+    std::vector<TensorMetadata> outputTensors;
+
+    const int nbIOTensors = engine->getNbIOTensors();
+    for (int i = 0; i < nbIOTensors; ++i) {
+        TensorMetadata metadata;
+        if (!metadata.syncFromEngine(engine, context, i)) {
+            m_logger->log(Severity::kERROR,
+                          fmt::format("TensorMetadata::syncFromEngine failed at tensor index {}.", i)
+                              .c_str());
+            return false;
+        }
+
+        m_logger->log(Severity::kINFO,
+                      fmt::format("Cached {} tensor[{}] {} shape={} elements={} bytes={}",
+                                  tensorModeName(metadata.mode), metadata.index,
+                                  metadata.name, dimsToString(metadata.dims),
+                                  metadata.elementCount, metadata.byteSize)
+                          .c_str());
+
+        if (metadata.mode == TensorIOMode::kINPUT) {
+            inputTensors.push_back(std::move(metadata));
+        } else if (metadata.mode == TensorIOMode::kOUTPUT) {
+            outputTensors.push_back(std::move(metadata));
+        }
+    }
+
+    if (inputTensors.size() != 1 || outputTensors.size() != 1) {
+        m_logger->log(Severity::kERROR,
+                      fmt::format("TensorRTModule supports exactly 1 input and 1 output, got {} inputs and {} outputs.",
+                                  inputTensors.size(), outputTensors.size())
+                          .c_str());
+        return false;
+    }
+
+    m_inputTensors = std::move(inputTensors);
+    m_outputTensors = std::move(outputTensors);
+
+    return true;
 }
 
 auto TensorRTModule::createEngine(std::unique_ptr<nvinfer1::IBuilder> builder,
@@ -189,16 +359,20 @@ void TensorRTModule::initialize(const TRTParams &buildConfig) {
         serializeEngine(m_engine, engineFilePath);
     }
     assert(m_engine != nullptr);
-    checkEngine(m_engine.get());
+
     m_context.reset(m_engine->createExecutionContext());
     assert(m_context != nullptr);
+    checkEngine(m_engine.get(), m_context.get());
 
-    inputTensorName = m_engine->getIOTensorName(0);
-    outputTensorName = m_engine->getIOTensorName(1);
+    if (!cacheEngineIO(m_engine.get(), m_context.get())) {
+        m_logger->log(Severity::kERROR, "Failed to cache engine I/O metadata.");
+        return;
+    }
 
-    const size_t inputSize = m_params.batchSize * m_params.channels *
-                              m_params.input_h * m_params.input_w * sizeof(float);
-    const size_t outputSize = m_params.batchSize * m_params.output_size * sizeof(float);
+    const TensorMetadata& inputTensor = getInputTensorMetadata();
+    const TensorMetadata& outputTensor = getOutputTensorMetadata();
+    const size_t inputSize = inputTensor.byteSize;
+    const size_t outputSize = outputTensor.byteSize;
 
     void* rawInput  = nullptr;
     void* rawOutput = nullptr;
@@ -210,8 +384,8 @@ void TensorRTModule::initialize(const TRTParams &buildConfig) {
     CHECK(cudaHostGetDevicePointer(&deviceOutput, m_hostOutput.get(), 0));
     CHECK(cudaStreamCreate(&m_stream));
 
-    m_context->setTensorAddress(inputTensorName.c_str(), deviceInput);
-    m_context->setTensorAddress(outputTensorName.c_str(), deviceOutput);
+    m_context->setTensorAddress(inputTensor.name.c_str(), deviceInput);
+    m_context->setTensorAddress(outputTensor.name.c_str(), deviceOutput);
 
     if (!buildGraph()) {
         m_logger->log(Severity::kWARNING,
@@ -223,8 +397,7 @@ void TensorRTModule::initialize(const TRTParams &buildConfig) {
 }
 
 bool TensorRTModule::infer(const float* input, size_t numElements) {
-    const size_t expected = static_cast<size_t>(m_params.batchSize) * m_params.channels *
-                            m_params.input_h * m_params.input_w;
+    const size_t expected = getInputTensorMetadata().elementCount;
     if (input == nullptr) {
         m_logger->log(Severity::kERROR, "input is null.");
         return false;
@@ -264,8 +437,7 @@ double TensorRTModule::benchmark(int iterations, const float* inputData) {
         return 0.0;
     }
 
-    const size_t inputSize = static_cast<size_t>(m_params.batchSize) *
-                              m_params.channels * m_params.input_h * m_params.input_w;
+    const size_t inputSize = getInputTensorMetadata().elementCount;
     std::memcpy(m_hostInput.get(), inputData, inputSize * sizeof(float));
 
     auto start = std::chrono::high_resolution_clock::now();

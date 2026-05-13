@@ -3,6 +3,7 @@
 #include "logging.h"
 #include <NvInfer.h>
 #include <NvInferRuntime.h>
+#include <cassert>
 #include <cuda_runtime_api.h>
 #include <string>
 #include <vector>
@@ -11,6 +12,20 @@
 #endif
 
 using CudaHostPtr = std::unique_ptr<void, decltype(&cudaFreeHost)>;
+
+struct TensorMetadata {
+    int index{-1};
+    std::string name;
+    nvinfer1::TensorIOMode mode{nvinfer1::TensorIOMode::kNONE};
+    nvinfer1::Dims dims{};
+    nvinfer1::DataType dataType{nvinfer1::DataType::kFLOAT};
+    size_t elementCount{0};
+    size_t byteSize{0};
+
+    bool syncFromEngine(nvinfer1::ICudaEngine* engine,
+                        nvinfer1::IExecutionContext* context,
+                        int tensorIndex);
+};
 
 struct TRTParams {
     std::string onnxFilePath;
@@ -51,17 +66,29 @@ class TensorRTModule {
 
     float* getHostInput()  const { return static_cast<float*>(m_hostInput.get()); }
     float* getHostOutput() const { return static_cast<float*>(m_hostOutput.get()); }
+    // Current inference path supports exactly one input/output. Valid after initialize() succeeds.
+    const TensorMetadata& getInputTensorMetadata() const {
+        assert(!m_inputTensors.empty());
+        return m_inputTensors.front();
+    }
+    const TensorMetadata& getOutputTensorMetadata() const {
+        assert(!m_outputTensors.empty());
+        return m_outputTensors.front();
+    }
+    const std::vector<TensorMetadata>& getInputTensorsMetadata() const { return m_inputTensors; }
+    const std::vector<TensorMetadata>& getOutputTensorsMetadata() const { return m_outputTensors; }
 
   private:
-    void parserModel(const std::string &onnxFilePath,
+    [[deprecated("Use the cli tool `trtexec` instead")]] void parserModel(const std::string &onnxFilePath,
                      nvinfer1::INetworkDefinition *network);
-    auto createEngine(std::unique_ptr<nvinfer1::IBuilder> builder,
+    [[deprecated("Use the cli tool `trtexec` instead")]] auto createEngine(std::unique_ptr<nvinfer1::IBuilder> builder,
                       std::unique_ptr<nvinfer1::INetworkDefinition> network)
         -> std::unique_ptr<nvinfer1::ICudaEngine>;
-    void serializeEngine(std::unique_ptr<nvinfer1::ICudaEngine> &engine,
+    [[deprecated("Use the cli tool `trtexec` instead")]] void serializeEngine(std::unique_ptr<nvinfer1::ICudaEngine> &engine,
                          std::string_view engineFilePath);
     bool doInference();
-    void checkEngine(nvinfer1::ICudaEngine *engine);
+    void checkEngine(nvinfer1::ICudaEngine *engine, nvinfer1::IExecutionContext *context);
+    bool cacheEngineIO(nvinfer1::ICudaEngine *engine, nvinfer1::IExecutionContext *context);
     bool buildGraph();
 
   private:
@@ -78,6 +105,6 @@ class TensorRTModule {
     cudaStream_t m_stream{nullptr};
     cudaGraphExec_t m_graphExec{nullptr};
 
-    std::string inputTensorName;
-    std::string outputTensorName;
+    std::vector<TensorMetadata> m_inputTensors;
+    std::vector<TensorMetadata> m_outputTensors;
 };

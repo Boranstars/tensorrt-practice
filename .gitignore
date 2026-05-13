@@ -16,3 +16,7 @@ build
 # system
 *.log
 *.DS_Store
+
+# picture
+*.mp4
+*_result.jpg

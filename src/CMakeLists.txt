@@ -6,3 +6,4 @@ add_subdirectory(lenet)
 add_subdirectory(googlenet)
 add_subdirectory(resnet)
 add_subdirectory(yolov5)
+
